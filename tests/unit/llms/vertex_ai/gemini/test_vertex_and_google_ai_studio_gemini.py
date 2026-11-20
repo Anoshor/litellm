@@ -12390,3 +12390,33 @@ def test_grounding_support_preserves_every_web_source(chunk_indices: list[int]) 
         }
         for index, start, end in expected_sources
     ]
+
+
+@pytest.mark.parametrize("model", ["gemini-3.1-flash-image", "gemini-nano-banana-2.1"])
+def test_vertex_gemini_image_model_rejects_n_above_one(model: str) -> None:
+    with pytest.raises(litellm.UnsupportedParamsError, match="n=2 is not supported"):
+        VertexGeminiConfig().map_openai_params(
+            non_default_params={"n": 2}, optional_params={}, model=model, drop_params=False
+        )
+
+    dropped: Final = VertexGeminiConfig().map_openai_params(
+        non_default_params={"n": 2}, optional_params={}, model=model, drop_params=True
+    )
+    assert "candidate_count" not in dropped
+
+    single: Final = VertexGeminiConfig().map_openai_params(
+        non_default_params={"n": 1}, optional_params={}, model=model, drop_params=False
+    )
+    assert single["candidate_count"] == 1
+
+
+def test_n_above_one_still_maps_to_candidate_count_for_text_and_ai_studio_models() -> None:
+    text_model: Final = VertexGeminiConfig().map_openai_params(
+        non_default_params={"n": 2}, optional_params={}, model="gemini-2.5-flash", drop_params=False
+    )
+    assert text_model["candidate_count"] == 2
+
+    ai_studio: Final = GoogleAIStudioGeminiConfig().map_openai_params(
+        non_default_params={"n": 2}, optional_params={}, model="gemini-3.1-flash-image", drop_params=False
+    )
+    assert ai_studio["candidate_count"] == 2

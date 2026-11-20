@@ -1932,6 +1932,13 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 optional_params["include_server_side_tool_invocations"] = True
                 return
 
+    def _returns_one_candidate(self, model: str) -> bool:
+        rows: Final = cast(Mapping[str, Mapping[str, object]], litellm.model_cost)  # cast-ok: JSON rows by model id
+        return (
+            self._route == "vertex_ai"
+            and rows.get(f"{self._route}/{model.split('/')[-1]}", {}).get("mode") == "image_generation"
+        )
+
     def _drops_logprobs(self, model: str, drop_params: bool, allowed_openai_params: Sequence[str]) -> bool:
         if not drops_unsupported_params(drop_params) or {"logprobs", "top_logprobs"} & set(allowed_openai_params):
             return False
@@ -1980,6 +1987,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         self._apply_include_server_side_tool_invocations(request_params, optional_params)
         supports_sampling_params: Final = self.supports_sampling_params(model)
         drops_logprobs: Final = self._drops_logprobs(model, drop_params, allowed_openai_params)
+        returns_one_candidate: Final = self._returns_one_candidate(model)
         for param, value in request_params.items():
             if param in ("temperature", "top_p", "top_k") and not supports_sampling_params:
                 continue
@@ -2007,6 +2015,17 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
             ):  # sending stream = False, can cause it to get passed unchecked and raise issues
                 optional_params["stream"] = value
             elif param == "n":
+                if returns_one_candidate and isinstance(value, int) and value > 1:
+                    if drops_unsupported_params(drop_params):
+                        continue
+                    raise UnsupportedParamsError(
+                        message=(
+                            f"{model} returns one image per request on Vertex AI, so n={value} is not supported. "
+                            "Send n=1 or separate requests, or set drop_params to drop n."
+                        ),
+                        model=model,
+                        llm_provider=self._route,
+                    )
                 optional_params["candidate_count"] = value
             elif param == "audio" and isinstance(value, dict):
                 optional_params["speechConfig"] = self._map_chat_audio_params(model, value, drop_params)
