@@ -16,10 +16,17 @@ const state = vi.hoisted(() => ({
   can: {} as Record<string, boolean>,
   uiSettings: {} as Record<string, unknown>,
   tags: {} as Record<string, { name: string }>,
-  teams: [] as { team_id: string; team_alias: string; models: string[]; organization_id?: string }[],
+  teams: [] as {
+    team_id: string;
+    team_alias: string;
+    models: string[];
+    organization_id?: string;
+    members_with_roles?: { user_id: string; user_email?: string | null; role: string }[];
+    team_member_permissions?: string[];
+  }[],
   organizations: [] as { organization_id: string; organization_alias: string }[],
   accessGroups: [] as { access_group_id: string; access_group_name: string }[],
-  projects: [] as { project_id: string; project_alias: string; team_id?: string; models?: string[] }[],
+  projects: [] as { project_id: string; project_alias: string; team_id?: string | null; models?: string[] }[],
 }));
 
 vi.mock("@/lib/toast", () => ({
@@ -658,12 +665,73 @@ describe("CreateKey", () => {
       expect(await createdPayload()).toMatchObject({ key_alias: "wire-alias", team_id: "team-1" });
     });
 
+    it("offers a team member only the teams where they are allowed to create keys", async () => {
+      state.authorized = { ...state.authorized, userRole: "Internal User" };
+      const membership = (role: string) => [{ user_id: state.authorized.userId, user_email: null, role }];
+      state.teams = [
+        {
+          team_id: "team-allowed",
+          team_alias: "Keys Allowed",
+          models: [],
+          members_with_roles: membership("user"),
+          team_member_permissions: ["/key/generate"],
+        },
+        {
+          team_id: "team-blocked",
+          team_alias: "Keys Blocked",
+          models: [],
+          members_with_roles: membership("user"),
+          team_member_permissions: ["/key/info"],
+        },
+        {
+          team_id: "team-administered",
+          team_alias: "Team I Administer",
+          models: [],
+          members_with_roles: membership("admin"),
+          team_member_permissions: [],
+        },
+      ];
+      await openModal({ teams: state.teams as unknown as Team[] });
+      await userEvent.click(await screen.findByLabelText("Team"));
+
+      expect(await screen.findByRole("option", { name: /Keys Allowed/ })).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: /Team I Administer/ })).toBeInTheDocument();
+      expect(screen.queryByRole("option", { name: /Keys Blocked/ })).not.toBeInTheDocument();
+    });
+
     it("sends team_id as an explicit null when no team is chosen", async () => {
       await openModal();
       await nameTheKey();
       await submit();
 
       expect(await createdPayload()).toHaveProperty("team_id", null);
+    });
+
+    it("does not select an ineligible team through a project", async () => {
+      state.authorized = { ...state.authorized, userRole: "Internal User" };
+      state.teams = [
+        {
+          team_id: "team-blocked",
+          team_alias: "Keys Blocked",
+          models: [],
+          members_with_roles: [{ user_id: state.authorized.userId, role: "user" }],
+          team_member_permissions: [],
+        },
+      ];
+      state.projects = [
+        { project_id: "project-blocked", project_alias: "Blocked Project", team_id: "team-blocked" },
+        { project_id: "project-missing", project_alias: "Missing Team Project", team_id: "team-missing" },
+        { project_id: "project-unowned", project_alias: "Unowned Project", team_id: null },
+      ];
+      await openModal({ teams: state.teams as unknown as Team[] });
+      await userEvent.click(await screen.findByLabelText("Project"));
+      expect(screen.queryByRole("option", { name: /Blocked Project/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("option", { name: /Missing Team Project/ })).not.toBeInTheDocument();
+      await userEvent.click(await screen.findByRole("option", { name: /Unowned Project/ }));
+      await nameTheKey();
+      await submit();
+
+      expect(await createdPayload()).toMatchObject({ team_id: null, project_id: "project-unowned" });
     });
 
     it.fails(
@@ -875,6 +943,44 @@ describe("CreateKey", () => {
   });
 
   describe("deep link prefill", () => {
+    it("does not prefill an ineligible project", async () => {
+      state.authorized = { ...state.authorized, userRole: "Internal User" };
+      state.projects = [{ project_id: "project-blocked", project_alias: "Blocked Project", team_id: "team-blocked" }];
+      const prefillData = { project_id: "project-blocked", key_alias: "without-blocked-project" };
+      renderCreateKey({ autoOpenCreate: true, prefillData });
+
+      expect(await screen.findByLabelText("Project")).toHaveValue("");
+      await submit();
+
+      expect((await createdPayload()).project_id).toBeUndefined();
+    });
+
+    it.each(["initial team", "deep link"])("ignores an ineligible team supplied through %s", async (source) => {
+      state.authorized = { ...state.authorized, userRole: "Internal User" };
+      const blockedTeam = {
+        team_id: "team-blocked",
+        team_alias: "Keys Blocked",
+        models: [],
+        members_with_roles: [{ user_id: state.authorized.userId, user_email: null, role: "user" }],
+        team_member_permissions: [],
+      };
+      state.teams = [blockedTeam];
+      renderCreateKey({
+        team: source === "initial team" ? (blockedTeam as Team) : null,
+        teams: [blockedTeam as Team],
+        autoOpenCreate: true,
+        prefillData: {
+          key_alias: "without-blocked-team",
+          ...(source === "deep link" ? { team_id: blockedTeam.team_id } : {}),
+        },
+      });
+
+      expect(await screen.findByLabelText("Team")).toHaveValue("");
+      await submit();
+
+      expect((await createdPayload()).team_id).toBeNull();
+    });
+
     it("prefills the key alias", async () => {
       renderCreateKey({ autoOpenCreate: true, prefillData: { key_alias: "prefilled-key" } });
 
